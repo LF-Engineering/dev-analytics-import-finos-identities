@@ -538,9 +538,6 @@ func cleanupUnaffiliated(dbg bool, uidentities []shUIdentity) {
 	for i, uidentity := range uidentities {
 		for j, enrollment := range uidentity.Enrollments {
 			if enrollment.Organization == "Unaffiliated" {
-				//a[i] = a[len(a)-1] // Copy last element to index i.
-				//a[len(a)-1] = ""   // Erase last element (write zero value).
-				//a = a[:len(a)-1]   // Truncate slice.
 				last := len(uidentities[i].Enrollments) - 1
 				if last == 0 {
 					uidentities[i].Enrollments = []shEnrollment{}
