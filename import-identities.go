@@ -6,7 +6,9 @@ import (
 	"io/ioutil"
 	"os"
 	"reflect"
+	"runtime"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 
@@ -131,6 +133,32 @@ func exec(db *sql.DB, skip, query string, args ...interface{}) (sql.Result, erro
 		}
 	}
 	return res, err
+}
+
+func getThreadsNum() int {
+	st := os.Getenv("ST") != ""
+	if st {
+		return 1
+	}
+	nCPUs := 0
+	if os.Getenv("NCPUS") != "" {
+		n, err := strconv.Atoi(os.Getenv("NCPUS"))
+		fatalOnError(err)
+		if n > 0 {
+			nCPUs = n
+		}
+	}
+	if nCPUs > 0 {
+		n := runtime.NumCPU()
+		if nCPUs > n {
+			nCPUs = n
+		}
+		runtime.GOMAXPROCS(nCPUs)
+		return nCPUs
+	}
+	nCPUs = runtime.NumCPU()
+	runtime.GOMAXPROCS(nCPUs)
+	return nCPUs
 }
 
 func lookupUIdentity(db *sql.DB, dbg bool, uidentity *shUIdentity) (uuid string) {
@@ -328,14 +356,27 @@ func postprocessIdentities(db *sql.DB, dbg bool, uidentitiesAry []shUIdentity, u
 			uident.Enrollments[i].UUID = uid
 		}
 	}
-	for i, uidentity := range uidentitiesAry {
+	type resultType struct {
+		i    int
+		uuid string
+	}
+	processItem := func(ch chan resultType, idx int, uidentity shUIdentity) (result resultType) {
+		uuid := ""
+		result.i = idx
+		defer func() {
+			if ch != nil {
+				result.uuid = uuid
+				ch <- result
+			}
+		}()
 		if uidentity.Profile.Name == "" {
 			fatalf("profile without name: %+v\n", uidentity.String())
 		}
 		if len(uidentity.Enrollments) == 0 {
-			continue
+			uuid = "skip"
+			return
 		}
-		iAry, ok := unknownsAry[i].(map[interface{}]interface{})
+		iAry, ok := unknownsAry[idx].(map[interface{}]interface{})
 		if !ok {
 			fatalf("cannot parse dynamic datasource identities list fields: %+v\n", uidentity.String())
 		}
@@ -374,19 +415,51 @@ func postprocessIdentities(db *sql.DB, dbg bool, uidentitiesAry []shUIdentity, u
 				uidentity.Enrollments[ei].End = gDefaultEndDate
 			}
 		}
-		uuid := lookupUIdentity(db, dbg, &uidentity)
+		uuid = lookupUIdentity(db, dbg, &uidentity)
 		if uuid == "" {
 			if dbg {
-				fmt.Printf("warning: cannot find %s identity in our database\n", uidentity.String())
+				fmt.Printf("WARNING: cannot find %s identity in our database\n", uidentity.String())
 			}
-			missing = append(missing, uidentity)
-			continue
+			return
 		}
 		if dbg {
 			fmt.Printf("found %s\n", uidentity.String())
 		}
-		setUUID(&uidentity, uuid)
-		uidentitiesMap[uuid] = uidentity
+		return
+	}
+	processResult := func(result resultType) {
+		idx := result.i
+		uuid := result.uuid
+		if uuid == "skip" {
+			return
+		}
+		if uuid != "" {
+			setUUID(&uidentitiesAry[idx], uuid)
+			uidentitiesMap[uuid] = uidentitiesAry[idx]
+		} else {
+			missing = append(missing, uidentitiesAry[idx])
+		}
+	}
+	thrN := getThreadsNum()
+	ch := make(chan resultType)
+	if thrN > 1 {
+		nThreads := 0
+		for i, uidentity := range uidentitiesAry {
+			go processItem(ch, i, uidentity)
+			nThreads++
+			if nThreads == thrN {
+				processResult(<-ch)
+				nThreads--
+			}
+		}
+		for nThreads > 0 {
+			processResult(<-ch)
+			nThreads--
+		}
+	} else {
+		for i, uidentity := range uidentitiesAry {
+			processResult(processItem(nil, i, uidentity))
+		}
 	}
 	if len(missing) > 0 {
 		fmt.Printf("cannot find %d profiles\n", len(missing))
