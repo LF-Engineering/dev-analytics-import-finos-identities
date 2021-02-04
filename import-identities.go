@@ -135,7 +135,8 @@ func exec(db *sql.DB, skip, query string, args ...interface{}) (sql.Result, erro
 
 func lookupUIdentity(db *sql.DB, uidentity *shUIdentity) {
 	name := uidentity.Profile.Name
-	rows, err := query(db, "select uuid from profiles where name = ?", name)
+	// by name
+	rows, err := query(db, "select distinct uuid from profiles where name = ?", name)
 	fatalOnError(err)
 	uuid := ""
 	fetched := false
@@ -158,10 +159,173 @@ func lookupUIdentity(db *sql.DB, uidentity *shUIdentity) {
 		}
 	}
 	if uuid != "" && fetched && !multi {
+		fmt.Printf("found by name '%s' -> %s\n", name, uuid)
 		setUUID(uuid)
 		return
 	}
-	fmt.Printf("%s -> (%s,%v,%v)\n", name, uuid, fetched, multi)
+	fmt.Printf("not found by name '%s' -> (%s,%v,%v)\n", name, uuid, fetched, multi)
+	// by source/username
+	for source, userNames := range uidentity.Others {
+		for _, userName := range userNames {
+			rows, err := query(db, "select distinct uuid from identities where username = ? and source = ?", userName, source)
+			fatalOnError(err)
+			uuid = ""
+			fetched = false
+			multi = false
+			for rows.Next() {
+				fatalOnError(rows.Scan(&uuid))
+				if fetched {
+					multi = true
+					break
+				}
+				fetched = true
+			}
+			fatalOnError(rows.Err())
+			fatalOnError(rows.Close())
+			if uuid != "" && fetched && !multi {
+				fmt.Printf("found by source/username '%s/%s' -> %s\n", source, userName, uuid)
+				setUUID(uuid)
+				return
+			}
+			fmt.Printf("not found by source/username '%s/%s' -> (%s,%v,%v)\n", source, userName, uuid, fetched, multi)
+		}
+		fmt.Printf("not found by source/usernames '%s/%v' -> (%s,%v,%v)\n", source, userNames, uuid, fetched, multi)
+	}
+	// by email
+	for _, email := range uidentity.Emails {
+		rows, err := query(db, "select distinct uuid from identities where email = ?", email)
+		fatalOnError(err)
+		uuid = ""
+		fetched = false
+		multi = false
+		for rows.Next() {
+			fatalOnError(rows.Scan(&uuid))
+			if fetched {
+				multi = true
+				break
+			}
+			fetched = true
+		}
+		fatalOnError(rows.Err())
+		fatalOnError(rows.Close())
+		if uuid != "" && fetched && !multi {
+			fmt.Printf("found by email '%s' -> %s\n", email, uuid)
+			setUUID(uuid)
+			return
+		}
+		fmt.Printf("not found by email '%s' -> (%s,%v,%v)\n", email, uuid, fetched, multi)
+	}
+	// by name & source/username
+	for source, userNames := range uidentity.Others {
+		for _, userName := range userNames {
+			rows, err := query(db, "select distinct uuid from identities where name = ? and username = ? and source = ?", name, userName, source)
+			fatalOnError(err)
+			uuid = ""
+			fetched = false
+			multi = false
+			for rows.Next() {
+				fatalOnError(rows.Scan(&uuid))
+				if fetched {
+					multi = true
+					break
+				}
+				fetched = true
+			}
+			fatalOnError(rows.Err())
+			fatalOnError(rows.Close())
+			if uuid != "" && fetched && !multi {
+				fmt.Printf("found by name/source/username '%s/%s/%s' -> %s\n", name, source, userName, uuid)
+				setUUID(uuid)
+				return
+			}
+			fmt.Printf("not found by name/source/username '%s/%s/%s' -> (%s,%v,%v)\n", name, source, userName, uuid, fetched, multi)
+		}
+		fmt.Printf("not found by name/source/usernames '%s/%s/%v' -> (%s,%v,%v)\n", name, source, userNames, uuid, fetched, multi)
+	}
+	// by name & email
+	for _, email := range uidentity.Emails {
+		rows, err := query(db, "select distinct uuid from identities where name = ? and email = ?", name, email)
+		fatalOnError(err)
+		uuid = ""
+		fetched = false
+		multi = false
+		for rows.Next() {
+			fatalOnError(rows.Scan(&uuid))
+			if fetched {
+				multi = true
+				break
+			}
+			fetched = true
+		}
+		fatalOnError(rows.Err())
+		fatalOnError(rows.Close())
+		if uuid != "" && fetched && !multi {
+			fmt.Printf("found by name/email '%s/%s' -> %s\n", name, email, uuid)
+			setUUID(uuid)
+			return
+		}
+		fmt.Printf("not found by name/email '%s/%s' -> (%s,%v,%v)\n", name, email, uuid, fetched, multi)
+	}
+	// by source/username/email
+	for source, userNames := range uidentity.Others {
+		for _, email := range uidentity.Emails {
+			for _, userName := range userNames {
+				rows, err := query(db, "select distinct uuid from identities where username = ? and source = ? and email = ?", userName, source, email)
+				fatalOnError(err)
+				uuid = ""
+				fetched = false
+				multi = false
+				for rows.Next() {
+					fatalOnError(rows.Scan(&uuid))
+					if fetched {
+						multi = true
+						break
+					}
+					fetched = true
+				}
+				fatalOnError(rows.Err())
+				fatalOnError(rows.Close())
+				if uuid != "" && fetched && !multi {
+					fmt.Printf("found by email/source/username '%s/%s/%s' -> %s\n", email, source, userName, uuid)
+					setUUID(uuid)
+					return
+				}
+				fmt.Printf("not found by email/source/username '%s/%s/%s' -> (%s,%v,%v)\n", email, source, userName, uuid, fetched, multi)
+			}
+			fmt.Printf("not found by email/source/usernames '%s/%s/%v' -> (%s,%v,%v)\n", email, source, userNames, uuid, fetched, multi)
+		}
+		fmt.Printf("not found by emails/source/usernames '%sv/%s/%v' -> (%s,%v,%v)\n", uidentity.Emails, source, userNames, uuid, fetched, multi)
+	}
+	// by name/source/username/email
+	for source, userNames := range uidentity.Others {
+		for _, email := range uidentity.Emails {
+			for _, userName := range userNames {
+				rows, err := query(db, "select distinct uuid from identities where username = ? and source = ? and email = ? and name = ?", userName, source, email, name)
+				fatalOnError(err)
+				uuid = ""
+				fetched = false
+				multi = false
+				for rows.Next() {
+					fatalOnError(rows.Scan(&uuid))
+					if fetched {
+						multi = true
+						break
+					}
+					fetched = true
+				}
+				fatalOnError(rows.Err())
+				fatalOnError(rows.Close())
+				if uuid != "" && fetched && !multi {
+					fmt.Printf("found by name/email/source/username '%s/%s/%s/%s' -> %s\n", name, email, source, userName, uuid)
+					setUUID(uuid)
+					return
+				}
+				fmt.Printf("not found by name/email/source/username '%s/%s/%s/%s' -> (%s,%v,%v)\n", name, email, source, userName, uuid, fetched, multi)
+			}
+			fmt.Printf("not found by name/email/source/usernames '%s/%s/%s/%v' -> (%s,%v,%v)\n", name, email, source, userNames, uuid, fetched, multi)
+		}
+		fmt.Printf("not found by name/emails/source/usernames '%s/%v/%s/%v' -> (%s,%v,%v)\n", name, uidentity.Emails, source, userNames, uuid, fetched, multi)
+	}
 }
 
 func postprocessIdentities(db *sql.DB, uidentitiesAry []shUIdentity, unknownsAry []interface{}, uidentitiesMap map[string]shUIdentity) {
