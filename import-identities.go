@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"runtime"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -70,8 +71,10 @@ type importStats struct {
 	identitiesFound     int
 	identitiesSame      int
 	enrollmentsFound    int
+	enrollmentsAdded    int
 	enrollmentsSame     int
 	enrollmentsSkipped  int
+	enrollmentsDeleted  int
 }
 
 func fatalOnError(err error) {
@@ -99,7 +102,7 @@ func (p *shProfile) String() (s string) {
 }
 
 func (e *shEnrollment) String() (s string) {
-	s = fmt.Sprintf("{UUID:%s,Organization:%s,OrgID:%d,From:%s,End:%s,ProjectSlug:", e.UUID, e.Organization, e.OrgID, e.Start.String(), e.End.String())
+	s = fmt.Sprintf("{UUID:%s,Organization:%s,OrgID:%d,From:%s,End:%s,ProjectSlug:", e.UUID, e.Organization, e.OrgID, toYMDDate(e.Start), toYMDDate(e.End))
 	if e.ProjectSlug != nil {
 		s += *e.ProjectSlug + "}"
 	} else {
@@ -403,6 +406,7 @@ func postprocessIdentities(db *sql.DB, dbg bool, uidentitiesAry []shUIdentity, u
 		uident.Profile.UUID = uid
 		for i := range uident.Enrollments {
 			uident.Enrollments[i].UUID = uid
+			uident.Enrollments[i].ProjectSlug = gProjectSlug
 		}
 	}
 	type resultType struct {
@@ -536,7 +540,7 @@ func importYAMLfiles(db *sql.DB, fileNames []string) error {
 	}
 	nFiles := len(fileNames)
 	if dbg {
-		fmt.Printf("Importing %d files, replace mode: %v\n", nFiles, replace)
+		fmt.Printf("Importing %d files, debug: %v, dry-run: %v, compare mode: %v, replace mode: %v\n", nFiles, dbg, dry, compare, replace)
 	}
 	uidentitiesAry := []map[string]shUIdentity{}
 	orgs := make(map[string]struct{})
@@ -640,6 +644,10 @@ func importYAMLfiles(db *sql.DB, fileNames []string) error {
 		fmt.Printf("Returing due to dry-run mode\n")
 		return nil
 	}
+	//fmt.Printf("comp2id: %+v\n", comp2id)
+	//fmt.Printf("id2comp: %+v\n", id2comp)
+	//fmt.Printf("lcomp2id: %+v\n", lcomp2id)
+	//fmt.Printf("id2lcomp: %+v\n", id2lcomp)
 	orgsMissing := 0
 	var orgNamesMappings allMappings
 	thrN := getThreadsNum()
@@ -709,7 +717,9 @@ func importYAMLfiles(db *sql.DB, fileNames []string) error {
 							}
 							mut.Lock()
 							comp2id[comp] = cid
-							id2comp[cid] = comp
+							// WAS
+							// id2comp[cid] = comp
+							id2comp[cid] = to
 							mut.Unlock()
 							found = true
 							break
@@ -757,7 +767,9 @@ func importYAMLfiles(db *sql.DB, fileNames []string) error {
 							}
 							mut.Lock()
 							comp2id[comp] = cid
-							id2comp[cid] = comp
+							// WAS
+							// id2comp[cid] = comp
+							id2comp[cid] = to
 							mut.Unlock()
 							found = true
 							break
@@ -821,6 +833,12 @@ func importYAMLfiles(db *sql.DB, fileNames []string) error {
 		}
 		writer.Flush()
 	}
+	if dbg {
+		fmt.Printf("comp2id: %+v\n", comp2id)
+		fmt.Printf("id2comp: %+v\n", id2comp)
+		fmt.Printf("lcomp2id: %+v\n", lcomp2id)
+		fmt.Printf("id2lcomp: %+v\n", id2lcomp)
+	}
 	fmt.Printf("Number of organizations: %d, missing: %d\n", len(comp2id), orgsMissing)
 	var mtx *sync.RWMutex
 	if thrN > 1 {
@@ -863,6 +881,30 @@ func profilesDiffer(p1, p2 *shProfile) bool {
 	return false
 }
 
+func enrollmentsDiffer(e1, e2 []shEnrollment) bool {
+	m1 := make(map[string]struct{})
+	m2 := make(map[string]struct{})
+	for _, enrollment := range e1 {
+		m1[enrollment.String()] = struct{}{}
+	}
+	for _, enrollment := range e2 {
+		m2[enrollment.String()] = struct{}{}
+	}
+	for k1 := range m1 {
+		_, ok := m2[k1]
+		if !ok {
+			return true
+		}
+	}
+	for k2 := range m2 {
+		_, ok := m1[k2]
+		if !ok {
+			return true
+		}
+	}
+	return false
+}
+
 func processUIdentity(ch chan struct{}, mtx *sync.RWMutex, db *sql.DB, uidentity shUIdentity, comp2id map[string]int, id2comp map[int]string, flags []bool, stats *importStats) {
 	defer func() {
 		if ch != nil {
@@ -882,13 +924,16 @@ func processUIdentity(ch chan struct{}, mtx *sync.RWMutex, db *sql.DB, uidentity
 		stats.identitiesSame += sts.identitiesSame
 		stats.enrollmentsFound += sts.enrollmentsFound
 		stats.enrollmentsSame += sts.enrollmentsSame
+		stats.enrollmentsAdded += sts.enrollmentsAdded
+		stats.enrollmentsSkipped += sts.enrollmentsSkipped
+		stats.enrollmentsDeleted += sts.enrollmentsDeleted
 		if mtx != nil {
 			mtx.Unlock()
 		}
 	}()
 	_, _ = db.Exec("set @origin = ?", cOrigin)
 	dbg := flags[0]
-	//replace := flags[1]
+	replace := flags[1]
 	compare := flags[2]
 	rows, err := query(db, "select uuid from uidentities where uuid = ?", uidentity.UUID)
 	fatalOnError(err)
@@ -944,7 +989,7 @@ func processUIdentity(ch chan struct{}, mtx *sync.RWMutex, db *sql.DB, uidentity
 	for _, email := range uidentity.Emails {
 		emails[stripUnicodeStr(email)] = struct{}{}
 	}
-	if len(emails) > 0 {
+	if len(emails) > 0 && compare {
 		for source, userNames := range uidentity.Idents {
 			for _, userName := range userNames {
 				eemail := ""
@@ -969,7 +1014,7 @@ func processUIdentity(ch chan struct{}, mtx *sync.RWMutex, db *sql.DB, uidentity
 					sts.identitiesFound++
 				}
 				same = false
-				if fetched && compare {
+				if fetched {
 					_, ok := emails[eemail]
 					if ok {
 						sts.identitiesSame++
@@ -1035,72 +1080,89 @@ func processUIdentity(ch chan struct{}, mtx *sync.RWMutex, db *sql.DB, uidentity
 	}
 	fatalOnError(rows.Err())
 	fatalOnError(rows.Close())
-	/*
-		getCompIds := func() {
-			for i, enrollment := range uidentity.Enrollments {
-				if mtx != nil {
-					mtx.RLock()
-				}
-				orgID, ok := comp2id[enrollment.Organization]
-				if mtx != nil {
-					mtx.RUnlock()
-				}
-				if !ok {
-					fmt.Printf("Enrollments: unknown oranization: %s in: %+v\n", enrollment.Organization, uidentity.Enrollments)
-					continue
-				}
-				uidentity.Enrollments[i].OrgID = orgID
+	getCompIds := func() {
+		for i, enrollment := range uidentity.Enrollments {
+			if mtx != nil {
+				mtx.RLock()
 			}
+			orgID, ok := comp2id[enrollment.Organization]
+			if mtx != nil {
+				mtx.RUnlock()
+			}
+			if !ok {
+				fmt.Printf("Enrollments: unknown oranization: %s in: %+v\n", enrollment.Organization, uidentity.Enrollments)
+				continue
+			}
+			uidentity.Enrollments[i].OrgID = orgID
 		}
-		if fetched {
-			sts.enrollmentsFound++
+	}
+	if fetched {
+		sts.enrollmentsFound++
+	}
+	rolsString := func(rols []shEnrollment) string {
+		ary := []string{}
+		for _, rol := range rols {
+			ary = append(ary, rol.String())
 		}
-		compIDCalculated := false
-		same = false
-		if fetched && compare {
+		if len(ary) == 0 {
+			return ""
+		}
+		if len(ary) > 1 {
+			sort.Strings(ary)
+		}
+		return "[" + strings.Join(ary, ",") + "]"
+	}
+	compIDCalculated := false
+	same = false
+	if fetched && compare {
+		getCompIds()
+		compIDCalculated = true
+		same = !enrollmentsDiffer(uidentity.Enrollments, existingEnrollments)
+		if same {
+			sts.enrollmentsSame++
+			// FIXME
+		} else if dbg {
+			fmt.Printf("Enrollments differ: %+v != %+v\n", rolsString(uidentity.Enrollments), rolsString(existingEnrollments))
+		}
+	}
+	// found, they differ (or compare mode is off) and replace mode is on
+	// delete them
+	if fetched && !same && replace {
+		if gProjectSlug == nil {
+			_, err := exec(db, "", "delete from enrollments where uuid = ? and project_slug is null", uidentity.UUID)
+			fatalOnError(err)
+		} else {
+			_, err := exec(db, "", "delete from enrollments where uuid = ? and project_slug = ?", uidentity.UUID, *gProjectSlug)
+			fatalOnError(err)
+		}
+		sts.enrollmentsDeleted++
+	}
+	// they differ (which means there are no rols, compare mode is off or they actually differ) and
+	// none fetched or some fetched and replace mode is on
+	// add them
+	if !same && (!fetched || (fetched && replace)) {
+		if !compIDCalculated {
 			getCompIds()
-			compIDCalculated = true
-			same = !enrollmentsDiffer(uidentity.Enrollments, existingEnrollments)
-			if same {
-				sts.enrollmentsSame++
-			} else if dbg {
-				fmt.Printf("Enrollments differ: %+v != %+v\n", uidentity.Enrollments, existingEnrollments)
-			}
 		}
-		if fetched && !same && replace {
-			if gProjectSlug == nil {
-				_, err := exec(db, "", "delete from enrollments where uuid = ? and project_slug is null", uidentity.UUID)
-				fatalOnError(err)
-			} else {
-				_, err := exec(db, "", "delete from enrollments where uuid = ? and project_slug = ?", uidentity.UUID, *gProjectSlug)
-				fatalOnError(err)
+		for _, enrollment := range uidentity.Enrollments {
+			if enrollment.OrgID <= 0 {
+				sts.enrollmentsSkipped++
+				continue
 			}
-			sts.enrollmentsDeleted++
+			_, err := exec(
+				db,
+				"",
+				"insert into enrollments(uuid, organization_id, start, end, project_slug) values(?,?,?,?,?)",
+				enrollment.UUID,
+				enrollment.OrgID,
+				enrollment.Start,
+				enrollment.End,
+				gProjectSlug,
+			)
+			fatalOnError(err)
+			sts.enrollmentsAdded++
 		}
-		if !same && (!fetched || (fetched && replace)) {
-			if !compIDCalculated {
-				getCompIds()
-			}
-			for _, enrollment := range uidentity.Enrollments {
-				if enrollment.OrgID <= 0 {
-					sts.enrollmentsSkipped++
-					continue
-				}
-				_, err := exec(
-					db,
-					"",
-					"insert into enrollments(uuid, organization_id, start, end, project_slug) values(?,?,?,?,?)",
-					enrollment.UUID,
-					enrollment.OrgID,
-					enrollment.Start.Time,
-					enrollment.End.Time,
-					gProjectSlug,
-				)
-				fatalOnError(err)
-				sts.enrollmentsAdded++
-			}
-		}
-	*/
+	}
 }
 
 // getConnectString - get MariaDB SH (Sorting Hat) database DSN

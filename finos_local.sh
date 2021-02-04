@@ -1,1 +1,1 @@
-MISSING_ORGS_CSV=finos_missing_orgs MISSING_PROFILES_CSV=finos_missing_profiles ORGS_MAP_FILE=../dev-analytics-affiliation/map_org_names.yaml REPLACE='' COMPARE=1 PROJECT_SLUG=finos-f SH_DSN="`cat ../da-ds-gha/DB_CONN.local.secret`" ./import-identities.sh local
+MISSING_ORGS_CSV=finos_missing_orgs MISSING_PROFILES_CSV=finos_missing_profiles ORGS_MAP_FILE=../dev-analytics-affiliation/map_org_names.yaml REPLACE=1 COMPARE=1 PROJECT_SLUG=finos-f SH_DSN="`cat ../da-ds-gha/DB_CONN.local.secret`" ./import-identities.sh local
