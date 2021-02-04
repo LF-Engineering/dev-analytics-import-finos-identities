@@ -12,22 +12,38 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
-const cOrigin = "import-finos-identities"
+const (
+	cOrigin = "import-finos-identities"
+	nils    = "(nil)"
+	//emailStr = ",Email:"
+)
 
-// gProjectSlug comes from PROJECT_SLUG env (if set)
 var gProjectSlug *string
 
 type shData struct {
-	UIdentities []shUIdentity
+	UIdentities map[string]shUIdentity
 }
 
 type shUIdentity struct {
-	Profile shProfile `yaml:"profile"`
+	Profile     shProfile      `yaml:"profile"`
+	Enrollments []shEnrollment `yaml:"enrollments"`
+	Emails      []string       `yaml:"email"`
+	Others      map[string][]string
 }
 
 type shProfile struct {
 	Name  string `json:"name"`
 	IsBot *bool  `json:"is_bot"`
+	UUID  string
+}
+
+type shEnrollment struct {
+	Organization string    `json:"organization"`
+	Start        time.Time `json:"start"`
+	End          time.Time `json:"end"`
+	UUID         string
+	OrgID        int
+	ProjectSlug  *string
 }
 
 func fatalOnError(err error) {
@@ -43,6 +59,63 @@ func fatalf(f string, a ...interface{}) {
 	fatalOnError(fmt.Errorf(f, a...))
 }
 
+func (p *shProfile) String() (s string) {
+	s = "{UUID:" + p.UUID + ",Name:" + p.Name
+	s += ",IsBot:"
+	if p.IsBot != nil {
+		s += fmt.Sprintf("%v}", *p.IsBot)
+	} else {
+		s += nils + "}"
+	}
+	return
+}
+
+func (e *shEnrollment) String() (s string) {
+	s = fmt.Sprintf("{UUID:%s,Organization:%s,OrgID:%d,From:%s,End:%s,ProjectSlug:", e.UUID, e.Organization, e.OrgID, e.Start.String(), e.End.String())
+	if e.ProjectSlug != nil {
+		s += *e.ProjectSlug + "}"
+	} else {
+		s += nils + "}"
+	}
+	return
+}
+
+func postprocessIdentities(uidentitiesAry []shUIdentity, unknownsAry []interface{}, uidentitiesMap map[string]shUIdentity) {
+	for i, uidentity := range uidentitiesAry {
+		if uidentity.Profile.Name == "" {
+			fatalf("profile without name: %+v\n", uidentity)
+		}
+		if len(uidentity.Enrollments) == 0 {
+			continue
+		}
+		iAry, ok := unknownsAry[i].(map[interface{}]interface{})
+		if !ok {
+			fatalf("cannot parse dynamic datasource identities list fields: %+v\n", uidentity)
+		}
+		for ik, iv := range iAry {
+			k, ok := ik.(string)
+			if !ok {
+				fatalf("dynamic datasource identities list - cannot parse key %v,%T as string: %+v\n", ik, ik, uidentity)
+			}
+			if k == "profile" || k == "enrollments" || k == "email" {
+				continue
+			}
+			v, ok := iv.([]interface{})
+			if !ok {
+				fatalf("dynamic datasource identities list - cannot parse key %s value %v,%T as array: %+v\n", k, iv, iv, uidentity)
+			}
+			fmt.Printf("%s,(%v,%v,%v)\n", k, v, ok, iv)
+		}
+		for _, enrollment := range uidentity.Enrollments {
+			if enrollment.Organization == "" {
+				fatalf("enrollment without organization name name: %+v i %+v\n", enrollment, uidentity)
+			}
+		}
+		// FIXME: if start,end date empty - set 1900 or 2100 s needed
+		// FIXME: find UUID for this uidentity using all data we have here
+	}
+}
+
 func importYAMLfiles(db *sql.DB, fileNames []string) error {
 	dbg := os.Getenv("DEBUG") != ""
 	//dry := os.Getenv("DRY") != ""
@@ -56,29 +129,29 @@ func importYAMLfiles(db *sql.DB, fileNames []string) error {
 	if dbg {
 		fmt.Printf("Importing %d files, replace mode: %v\n", nFiles, replace)
 	}
-	//uidentitiesAry := []map[string]shUIdentity{}
+	uidentitiesAry := []map[string]shUIdentity{}
 	orgs := make(map[string]struct{})
 	//missingOrgs := make(map[string]struct{})
 	for i, fileName := range fileNames {
 		fmt.Printf("Importing %d/%d: %s\n", i+1, nFiles, fileName)
 		var (
 			yAry []shUIdentity
+			iAry []interface{}
 			data shData
 		)
 		contents, err := ioutil.ReadFile(fileName)
 		fatalOnError(err)
 		fatalOnError(yaml.Unmarshal(contents, &yAry))
-		data.UIdentities = yAry
+		fatalOnError(yaml.Unmarshal(contents, &iAry))
+		postprocessIdentities(yAry, iAry, data.UIdentities)
 		fmt.Printf("%s: %d records\n", fileName, len(data.UIdentities))
 		fmt.Printf("%+v\n", data)
-		/*
-			for _, uidentity := range data.UIdentities {
-				for _, enrollment := range uidentity.Enrollments {
-					orgs[enrollment.Organization] = struct{}{}
-				}
+		for _, uidentity := range data.UIdentities {
+			for _, enrollment := range uidentity.Enrollments {
+				orgs[enrollment.Organization] = struct{}{}
 			}
-		*/
-		//uidentitiesAry = append(uidentitiesAry, data.UIdentities)
+		}
+		uidentitiesAry = append(uidentitiesAry, data.UIdentities)
 	}
 	fmt.Printf("%d orgs present in import files\n", len(orgs))
 	/*
