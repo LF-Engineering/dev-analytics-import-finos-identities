@@ -15,6 +15,8 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	"golang.org/x/text/transform"
+	"golang.org/x/text/unicode/norm"
 	"gopkg.in/yaml.v2"
 )
 
@@ -58,6 +60,18 @@ type shEnrollment struct {
 
 type allMappings struct {
 	Mappings [][2]string `yaml:"mappings"`
+}
+
+type importStats struct {
+	uidentitiesFound    int
+	uidentitiesNotFound int
+	profilesFound       int
+	profilesSame        int
+	identitiesFound     int
+	identitiesSame      int
+	enrollmentsFound    int
+	enrollmentsSame     int
+	enrollmentsSkipped  int
 }
 
 func fatalOnError(err error) {
@@ -171,6 +185,28 @@ func getThreadsNum() int {
 
 func toYMDDate(dt time.Time) string {
 	return fmt.Sprintf("%04d-%02d-%02d", dt.Year(), dt.Month(), dt.Day())
+}
+
+func stripUnicode(pStr *string) *string {
+	if pStr == nil {
+		return nil
+	}
+	str := *pStr
+	isOk := func(r rune) bool {
+		return r < 32 || r >= 127
+	}
+	t := transform.Chain(norm.NFKD, transform.RemoveFunc(isOk))
+	str, _, _ = transform.String(t, str)
+	return &str
+}
+
+func stripUnicodeStr(str string) string {
+	isOk := func(r rune) bool {
+		return r < 32 || r >= 127
+	}
+	t := transform.Chain(norm.NFKD, transform.RemoveFunc(isOk))
+	str, _, _ = transform.String(t, str)
+	return str
 }
 
 func lookupUIdentity(db *sql.DB, dbg bool, uidentity *shUIdentity) (uuid string) {
@@ -493,7 +529,7 @@ func importYAMLfiles(db *sql.DB, fileNames []string) error {
 	dbg := os.Getenv("DEBUG") != ""
 	dry := os.Getenv("DRY") != ""
 	replace := os.Getenv("REPLACE") != ""
-	//compare := os.Getenv("COMPARE") != ""
+	compare := os.Getenv("COMPARE") != ""
 	projectSlug := os.Getenv("PROJECT_SLUG")
 	if projectSlug != "" {
 		gProjectSlug = &projectSlug
@@ -786,37 +822,285 @@ func importYAMLfiles(db *sql.DB, fileNames []string) error {
 		writer.Flush()
 	}
 	fmt.Printf("Number of organizations: %d, missing: %d\n", len(comp2id), orgsMissing)
-	/*
-		var mtx *sync.RWMutex
+	var mtx *sync.RWMutex
+	if thrN > 1 {
+		mtx = &sync.RWMutex{}
+	}
+	stats := &importStats{}
+	for _, uidentities := range uidentitiesAry {
 		if thrN > 1 {
-			mtx = &sync.RWMutex{}
-		}
-		stats := &importStats{}
-		for _, uidentities := range uidentitiesAry {
-			if thrN > 1 {
-				ch := make(chan struct{})
-				nThreads := 0
-				for _, uidentity := range uidentities {
-					go processUIdentity(ch, mtx, db, uidentity, comp2id, id2comp, []bool{dbg, replace, compare, orgsRO}, stats)
-					nThreads++
-					if nThreads == thrN {
-						<-ch
-						nThreads--
-					}
-				}
-				for nThreads > 0 {
+			ch := make(chan struct{})
+			nThreads := 0
+			for _, uidentity := range uidentities {
+				go processUIdentity(ch, mtx, db, uidentity, comp2id, id2comp, []bool{dbg, replace, compare}, stats)
+				nThreads++
+				if nThreads == thrN {
 					<-ch
 					nThreads--
 				}
-			} else {
-				for _, uidentity := range uidentities {
-					processUIdentity(nil, mtx, db, uidentity, comp2id, id2comp, []bool{dbg, replace, compare, orgsRO}, stats)
+			}
+			for nThreads > 0 {
+				<-ch
+				nThreads--
+			}
+		} else {
+			for _, uidentity := range uidentities {
+				processUIdentity(nil, mtx, db, uidentity, comp2id, id2comp, []bool{dbg, replace, compare}, stats)
+			}
+		}
+	}
+	fmt.Printf("Stats:\n%+v\n", stats)
+	return nil
+}
+
+func profilesDiffer(p1, p2 *shProfile) bool {
+	if stripUnicodeStr(p1.Name) != stripUnicodeStr(p2.Name) {
+		return true
+	}
+	if p1.IsBot != nil && p2.IsBot != nil && *p1.IsBot != *p2.IsBot {
+		return true
+	}
+	return false
+}
+
+func processUIdentity(ch chan struct{}, mtx *sync.RWMutex, db *sql.DB, uidentity shUIdentity, comp2id map[string]int, id2comp map[int]string, flags []bool, stats *importStats) {
+	defer func() {
+		if ch != nil {
+			ch <- struct{}{}
+		}
+	}()
+	var sts importStats
+	defer func() {
+		if mtx != nil {
+			mtx.Lock()
+		}
+		stats.uidentitiesFound += sts.uidentitiesFound
+		stats.uidentitiesNotFound += sts.uidentitiesNotFound
+		stats.profilesFound += sts.profilesFound
+		stats.profilesSame += sts.profilesSame
+		stats.identitiesFound += sts.identitiesFound
+		stats.identitiesSame += sts.identitiesSame
+		stats.enrollmentsFound += sts.enrollmentsFound
+		stats.enrollmentsSame += sts.enrollmentsSame
+		if mtx != nil {
+			mtx.Unlock()
+		}
+	}()
+	_, _ = db.Exec("set @origin = ?", cOrigin)
+	dbg := flags[0]
+	//replace := flags[1]
+	compare := flags[2]
+	rows, err := query(db, "select uuid from uidentities where uuid = ?", uidentity.UUID)
+	fatalOnError(err)
+	uuid := uidentity.UUID
+	fetched := false
+	for rows.Next() {
+		fatalOnError(rows.Scan(&uuid))
+		fetched = true
+		break
+	}
+	fatalOnError(rows.Err())
+	fatalOnError(rows.Close())
+	if !fetched {
+		fmt.Printf("cannot find uidentity '%s'\n", uidentity.UUID)
+		sts.uidentitiesNotFound++
+		return
+	}
+	sts.uidentitiesFound++
+	var existingProfile shProfile
+	rows, err = query(
+		db,
+		"select uuid, coalesce(name, ''), is_bot from profiles where uuid = ?",
+		uidentity.UUID,
+	)
+	fatalOnError(err)
+	fetched = false
+	for rows.Next() {
+		fatalOnError(
+			rows.Scan(
+				&existingProfile.UUID,
+				&existingProfile.Name,
+				&existingProfile.IsBot,
+			),
+		)
+		fetched = true
+		break
+	}
+	fatalOnError(rows.Err())
+	fatalOnError(rows.Close())
+	if fetched {
+		sts.profilesFound++
+	}
+	same := false
+	if fetched && compare {
+		same = !profilesDiffer(&uidentity.Profile, &existingProfile)
+		if same {
+			sts.profilesSame++
+		} else if dbg {
+			fmt.Printf("Profiles differ: %s != %s\n", uidentity.Profile.String(), existingProfile.String())
+		}
+	}
+	emails := make(map[string]struct{})
+	for _, email := range uidentity.Emails {
+		emails[stripUnicodeStr(email)] = struct{}{}
+	}
+	if len(emails) > 0 {
+		for source, userNames := range uidentity.Idents {
+			for _, userName := range userNames {
+				eemail := ""
+				rows, err = query(
+					db,
+					"select coalesce(email, '') from identities where uuid = ? and source = ? and username = ? and email is not null",
+					uidentity.UUID,
+					source,
+					stripUnicodeStr(userName),
+				)
+				fatalOnError(err)
+				fetched = false
+				for rows.Next() {
+					fatalOnError(rows.Scan(&eemail))
+					eemail = stripUnicodeStr(eemail)
+					fetched = true
+					break
+				}
+				fatalOnError(rows.Err())
+				fatalOnError(rows.Close())
+				if fetched {
+					sts.identitiesFound++
+				}
+				same = false
+				if fetched && compare {
+					_, ok := emails[eemail]
+					if ok {
+						sts.identitiesSame++
+					} else if dbg {
+						fmt.Printf("Identities differ uuid: %s source: %s, username: %s, email %s not in %v\n", uidentity.UUID, source, userName, eemail, emails)
+					}
 				}
 			}
 		}
-		fmt.Printf("Stats:\n%+v\n", stats)
+	}
+	queryStr := ""
+	if gProjectSlug == nil {
+		if compare {
+			queryStr = "select uuid, organization_id, start, end, project_slug from enrollments where uuid = ? and project_slug is null"
+		} else {
+			queryStr = "select uuid from enrollments where uuid = ? and project_slug is null"
+		}
+		rows, err = query(db, queryStr, uidentity.UUID)
+	} else {
+		if compare {
+			queryStr = "select uuid, organization_id, start, end, project_slug from enrollments where uuid = ? and project_slug = ?"
+		} else {
+			queryStr = "select uuid from enrollments where uuid = ? and project_slug = ?"
+		}
+		rows, err = query(db, queryStr, uidentity.UUID, *gProjectSlug)
+	}
+	var (
+		existingEnrollments []shEnrollment
+		existingEnrollment  shEnrollment
+	)
+	fatalOnError(err)
+	fetched = false
+	for rows.Next() {
+		if compare {
+			fatalOnError(
+				rows.Scan(
+					&existingEnrollment.UUID,
+					&existingEnrollment.OrgID,
+					&existingEnrollment.Start,
+					&existingEnrollment.End,
+					&existingEnrollment.ProjectSlug,
+				),
+			)
+			if mtx != nil {
+				mtx.RLock()
+			}
+			organization, ok := id2comp[existingEnrollment.OrgID]
+			if mtx != nil {
+				mtx.RUnlock()
+			}
+			if !ok {
+				fatalf("organization id %d not found", existingEnrollment.OrgID)
+			}
+			existingEnrollment.Organization = organization
+			existingEnrollments = append(existingEnrollments, existingEnrollment)
+		} else {
+			fatalOnError(rows.Scan(&uuid))
+		}
+		fetched = true
+		if !compare {
+			break
+		}
+	}
+	fatalOnError(rows.Err())
+	fatalOnError(rows.Close())
+	/*
+		getCompIds := func() {
+			for i, enrollment := range uidentity.Enrollments {
+				if mtx != nil {
+					mtx.RLock()
+				}
+				orgID, ok := comp2id[enrollment.Organization]
+				if mtx != nil {
+					mtx.RUnlock()
+				}
+				if !ok {
+					fmt.Printf("Enrollments: unknown oranization: %s in: %+v\n", enrollment.Organization, uidentity.Enrollments)
+					continue
+				}
+				uidentity.Enrollments[i].OrgID = orgID
+			}
+		}
+		if fetched {
+			sts.enrollmentsFound++
+		}
+		compIDCalculated := false
+		same = false
+		if fetched && compare {
+			getCompIds()
+			compIDCalculated = true
+			same = !enrollmentsDiffer(uidentity.Enrollments, existingEnrollments)
+			if same {
+				sts.enrollmentsSame++
+			} else if dbg {
+				fmt.Printf("Enrollments differ: %+v != %+v\n", uidentity.Enrollments, existingEnrollments)
+			}
+		}
+		if fetched && !same && replace {
+			if gProjectSlug == nil {
+				_, err := exec(db, "", "delete from enrollments where uuid = ? and project_slug is null", uidentity.UUID)
+				fatalOnError(err)
+			} else {
+				_, err := exec(db, "", "delete from enrollments where uuid = ? and project_slug = ?", uidentity.UUID, *gProjectSlug)
+				fatalOnError(err)
+			}
+			sts.enrollmentsDeleted++
+		}
+		if !same && (!fetched || (fetched && replace)) {
+			if !compIDCalculated {
+				getCompIds()
+			}
+			for _, enrollment := range uidentity.Enrollments {
+				if enrollment.OrgID <= 0 {
+					sts.enrollmentsSkipped++
+					continue
+				}
+				_, err := exec(
+					db,
+					"",
+					"insert into enrollments(uuid, organization_id, start, end, project_slug) values(?,?,?,?,?)",
+					enrollment.UUID,
+					enrollment.OrgID,
+					enrollment.Start.Time,
+					enrollment.End.Time,
+					gProjectSlug,
+				)
+				fatalOnError(err)
+				sts.enrollmentsAdded++
+			}
+		}
 	*/
-	return nil
 }
 
 // getConnectString - get MariaDB SH (Sorting Hat) database DSN
