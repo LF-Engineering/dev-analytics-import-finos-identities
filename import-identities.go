@@ -15,10 +15,13 @@ import (
 const (
 	cOrigin = "import-finos-identities"
 	nils    = "(nil)"
-	//emailStr = ",Email:"
 )
 
-var gProjectSlug *string
+var (
+	gProjectSlug      *string
+	gDefaultStartDate = time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC)
+	gDefaultEndDate   = time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)
+)
 
 type shData struct {
 	UIdentities map[string]shUIdentity
@@ -28,6 +31,7 @@ type shUIdentity struct {
 	Profile     shProfile      `yaml:"profile"`
 	Enrollments []shEnrollment `yaml:"enrollments"`
 	Emails      []string       `yaml:"email"`
+	UUID        string
 	Others      map[string][]string
 }
 
@@ -80,6 +84,15 @@ func (e *shEnrollment) String() (s string) {
 	return
 }
 
+func (u *shUIdentity) String() string {
+	rols := "["
+	for _, rol := range u.Enrollments {
+		rols += rol.String() + ","
+	}
+	rols = rols[:len(rols)-1] + "]"
+	return fmt.Sprintf("{UUID:%s,Profile:%s,Emails:%v,Enrollments:%s,Others:%v}", u.UUID, u.Profile.String(), u.Emails, rols, u.Others)
+}
+
 func postprocessIdentities(uidentitiesAry []shUIdentity, unknownsAry []interface{}, uidentitiesMap map[string]shUIdentity) {
 	for i, uidentity := range uidentitiesAry {
 		if uidentity.Profile.Name == "" {
@@ -92,6 +105,7 @@ func postprocessIdentities(uidentitiesAry []shUIdentity, unknownsAry []interface
 		if !ok {
 			fatalf("cannot parse dynamic datasource identities list fields: %+v\n", uidentity)
 		}
+		uidentity.Others = make(map[string][]string)
 		for ik, iv := range iAry {
 			k, ok := ik.(string)
 			if !ok {
@@ -105,14 +119,26 @@ func postprocessIdentities(uidentitiesAry []shUIdentity, unknownsAry []interface
 				fatalf("dynamic datasource identities list - cannot parse key %s value %v,%T as array: %+v\n", k, iv, iv, uidentity)
 			}
 			fmt.Printf("%s,(%v,%v,%v)\n", k, v, ok, iv)
+			others := []string{}
+			for _, it := range v {
+				others = append(others, it.(string))
+			}
+			uidentity.Others[k] = others
 		}
-		for _, enrollment := range uidentity.Enrollments {
+		for ei, enrollment := range uidentity.Enrollments {
 			if enrollment.Organization == "" {
 				fatalf("enrollment without organization name name: %+v i %+v\n", enrollment, uidentity)
 			}
+			if enrollment.Start.IsZero() {
+				uidentity.Enrollments[ei].Start = gDefaultStartDate
+			}
+			if enrollment.End.IsZero() {
+				uidentity.Enrollments[ei].End = gDefaultEndDate
+			}
 		}
-		// FIXME: if start,end date empty - set 1900 or 2100 s needed
 		// FIXME: find UUID for this uidentity using all data we have here
+		fmt.Printf("%s\n", uidentity.String())
+		uidentitiesMap[uidentity.UUID] = uidentity
 	}
 }
 
@@ -143,6 +169,7 @@ func importYAMLfiles(db *sql.DB, fileNames []string) error {
 		fatalOnError(err)
 		fatalOnError(yaml.Unmarshal(contents, &yAry))
 		fatalOnError(yaml.Unmarshal(contents, &iAry))
+		data.UIdentities = make(map[string]shUIdentity)
 		postprocessIdentities(yAry, iAry, data.UIdentities)
 		fmt.Printf("%s: %d records\n", fileName, len(data.UIdentities))
 		fmt.Printf("%+v\n", data)
