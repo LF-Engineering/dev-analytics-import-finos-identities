@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/csv"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -36,7 +38,7 @@ type shUIdentity struct {
 	Enrollments []shEnrollment `yaml:"enrollments"`
 	Emails      []string       `yaml:"email"`
 	UUID        string
-	Others      map[string][]string
+	Idents      map[string][]string
 }
 
 type shProfile struct {
@@ -52,6 +54,10 @@ type shEnrollment struct {
 	UUID         string
 	OrgID        int
 	ProjectSlug  *string
+}
+
+type allMappings struct {
+	Mappings [][2]string `yaml:"mappings"`
 }
 
 func fatalOnError(err error) {
@@ -93,8 +99,10 @@ func (u *shUIdentity) String() string {
 	for _, rol := range u.Enrollments {
 		rols += rol.String() + ","
 	}
-	rols = rols[:len(rols)-1] + "]"
-	return fmt.Sprintf("{UUID:%s,Profile:%s,Emails:%v,Enrollments:%s,Others:%v}", u.UUID, u.Profile.String(), u.Emails, rols, u.Others)
+	if rols != "[" {
+		rols = rols[:len(rols)-1] + "]"
+	}
+	return fmt.Sprintf("{UUID:%s,Profile:%s,Emails:%v,Enrollments:%s,Idents:%v}", u.UUID, u.Profile.String(), u.Emails, rols, u.Idents)
 }
 
 func queryOut(query string, args ...interface{}) {
@@ -161,6 +169,10 @@ func getThreadsNum() int {
 	return nCPUs
 }
 
+func toYMDDate(dt time.Time) string {
+	return fmt.Sprintf("%04d-%02d-%02d", dt.Year(), dt.Month(), dt.Day())
+}
+
 func lookupUIdentity(db *sql.DB, dbg bool, uidentity *shUIdentity) (uuid string) {
 	printf := func(fmts string, args ...interface{}) {
 		if dbg {
@@ -189,7 +201,7 @@ func lookupUIdentity(db *sql.DB, dbg bool, uidentity *shUIdentity) (uuid string)
 	}
 	printf("not found by name '%s' -> (%s,%v,%v)\n", name, uuid, fetched, multi)
 	// by source/username
-	for source, userNames := range uidentity.Others {
+	for source, userNames := range uidentity.Idents {
 		for _, userName := range userNames {
 			rows, err := query(db, "select distinct uuid from identities where username = ? and source = ?", userName, source)
 			fatalOnError(err)
@@ -238,7 +250,7 @@ func lookupUIdentity(db *sql.DB, dbg bool, uidentity *shUIdentity) (uuid string)
 		printf("not found by email '%s' -> (%s,%v,%v)\n", email, uuid, fetched, multi)
 	}
 	// by name & source/username
-	for source, userNames := range uidentity.Others {
+	for source, userNames := range uidentity.Idents {
 		for _, userName := range userNames {
 			rows, err := query(db, "select distinct uuid from identities where name = ? and username = ? and source = ?", name, userName, source)
 			fatalOnError(err)
@@ -287,7 +299,7 @@ func lookupUIdentity(db *sql.DB, dbg bool, uidentity *shUIdentity) (uuid string)
 		printf("not found by name/email '%s/%s' -> (%s,%v,%v)\n", name, email, uuid, fetched, multi)
 	}
 	// by source/username/email
-	for source, userNames := range uidentity.Others {
+	for source, userNames := range uidentity.Idents {
 		for _, email := range uidentity.Emails {
 			for _, userName := range userNames {
 				rows, err := query(db, "select distinct uuid from identities where username = ? and source = ? and email = ?", userName, source, email)
@@ -316,7 +328,7 @@ func lookupUIdentity(db *sql.DB, dbg bool, uidentity *shUIdentity) (uuid string)
 		printf("not found by emails/source/usernames '%sv/%s/%v' -> (%s,%v,%v)\n", uidentity.Emails, source, userNames, uuid, fetched, multi)
 	}
 	// by name/source/username/email
-	for source, userNames := range uidentity.Others {
+	for source, userNames := range uidentity.Idents {
 		for _, email := range uidentity.Emails {
 			for _, userName := range userNames {
 				rows, err := query(db, "select distinct uuid from identities where username = ? and source = ? and email = ? and name = ?", userName, source, email, name)
@@ -349,6 +361,7 @@ func lookupUIdentity(db *sql.DB, dbg bool, uidentity *shUIdentity) (uuid string)
 }
 
 func postprocessIdentities(db *sql.DB, dbg bool, uidentitiesAry []shUIdentity, unknownsAry []interface{}, uidentitiesMap map[string]shUIdentity) (missing []shUIdentity) {
+	fmt.Printf("processing %d profiles\n", len(uidentitiesAry))
 	setUUID := func(uident *shUIdentity, uid string) {
 		uident.UUID = uid
 		uident.Profile.UUID = uid
@@ -360,6 +373,7 @@ func postprocessIdentities(db *sql.DB, dbg bool, uidentitiesAry []shUIdentity, u
 		i    int
 		uuid string
 	}
+	var mtx *sync.Mutex
 	processItem := func(ch chan resultType, idx int, uidentity shUIdentity) (result resultType) {
 		uuid := ""
 		result.i = idx
@@ -380,7 +394,7 @@ func postprocessIdentities(db *sql.DB, dbg bool, uidentitiesAry []shUIdentity, u
 		if !ok {
 			fatalf("cannot parse dynamic datasource identities list fields: %+v\n", uidentity.String())
 		}
-		uidentity.Others = make(map[string][]string)
+		uidentity.Idents = make(map[string][]string)
 		for ik, iv := range iAry {
 			k, ok := ik.(string)
 			if !ok {
@@ -402,7 +416,7 @@ func postprocessIdentities(db *sql.DB, dbg bool, uidentitiesAry []shUIdentity, u
 				}
 				others = append(others, its)
 			}
-			uidentity.Others[k] = others
+			uidentity.Idents[k] = others
 		}
 		for ei, enrollment := range uidentity.Enrollments {
 			if enrollment.Organization == "" {
@@ -414,6 +428,13 @@ func postprocessIdentities(db *sql.DB, dbg bool, uidentitiesAry []shUIdentity, u
 			if enrollment.End.IsZero() {
 				uidentity.Enrollments[ei].End = gDefaultEndDate
 			}
+		}
+		if mtx != nil {
+			mtx.Lock()
+		}
+		uidentitiesAry[idx].Idents = uidentity.Idents
+		if mtx != nil {
+			mtx.Unlock()
 		}
 		uuid = lookupUIdentity(db, dbg, &uidentity)
 		if uuid == "" {
@@ -444,6 +465,7 @@ func postprocessIdentities(db *sql.DB, dbg bool, uidentitiesAry []shUIdentity, u
 	ch := make(chan resultType)
 	if thrN > 1 {
 		nThreads := 0
+		mtx = &sync.Mutex{}
 		for i, uidentity := range uidentitiesAry {
 			go processItem(ch, i, uidentity)
 			nThreads++
@@ -469,7 +491,7 @@ func postprocessIdentities(db *sql.DB, dbg bool, uidentitiesAry []shUIdentity, u
 
 func importYAMLfiles(db *sql.DB, fileNames []string) error {
 	dbg := os.Getenv("DEBUG") != ""
-	//dry := os.Getenv("DRY") != ""
+	dry := os.Getenv("DRY") != ""
 	replace := os.Getenv("REPLACE") != ""
 	//compare := os.Getenv("COMPARE") != ""
 	projectSlug := os.Getenv("PROJECT_SLUG")
@@ -482,7 +504,12 @@ func importYAMLfiles(db *sql.DB, fileNames []string) error {
 	}
 	uidentitiesAry := []map[string]shUIdentity{}
 	orgs := make(map[string]struct{})
-	//missingOrgs := make(map[string]struct{})
+	missingOrgs := make(map[string]struct{})
+	missingProfiles := []shUIdentity{}
+	timeSuff := func() string {
+		dt := time.Now()
+		return fmt.Sprintf("_%04d%02d%02d%02d%02d%02d%09d", dt.Year(), dt.Month(), dt.Day(), dt.Hour(), dt.Minute(), dt.Second(), dt.Nanosecond())
+	}
 	for i, fileName := range fileNames {
 		fmt.Printf("Importing %d/%d: %s\n", i+1, nFiles, fileName)
 		var (
@@ -495,7 +522,10 @@ func importYAMLfiles(db *sql.DB, fileNames []string) error {
 		fatalOnError(yaml.Unmarshal(contents, &yAry))
 		fatalOnError(yaml.Unmarshal(contents, &iAry))
 		data.UIdentities = make(map[string]shUIdentity)
-		postprocessIdentities(db, dbg, yAry, iAry, data.UIdentities)
+		missing := postprocessIdentities(db, dbg, yAry, iAry, data.UIdentities)
+		for _, miss := range missing {
+			missingProfiles = append(missingProfiles, miss)
+		}
 		fmt.Printf("%s: %d records\n", fileName, len(data.UIdentities))
 		for _, uidentity := range data.UIdentities {
 			for _, enrollment := range uidentity.Enrollments {
@@ -504,219 +534,259 @@ func importYAMLfiles(db *sql.DB, fileNames []string) error {
 		}
 		uidentitiesAry = append(uidentitiesAry, data.UIdentities)
 	}
-	fmt.Printf("%d orgs present in import files\n", len(orgs))
-	/*
-		comp2id := make(map[string]int)
-		id2comp := make(map[int]string)
-		lcomp2id := make(map[string]int)
-		id2lcomp := make(map[int]string)
-		rows, err := query(db, "select id, name from organizations")
+	if len(missingProfiles) > 0 {
+		fn := os.Getenv("MISSING_PROFILES_CSV")
+		if fn == "" {
+			fn = "missing_profiles"
+		}
+		csvFile, err := os.Create(fn + timeSuff() + ".csv")
 		fatalOnError(err)
-		orgID := 0
-		orgName := ""
-		for rows.Next() {
-			fatalOnError(rows.Scan(&orgID, &orgName))
-			lOrgName := strings.ToLower(orgName)
-			comp2id[orgName] = orgID
-			id2comp[orgID] = orgName
-			lcomp2id[lOrgName] = orgID
-			id2lcomp[orgID] = lOrgName
-		}
-		fatalOnError(rows.Err())
-		fatalOnError(rows.Close())
-		if dry {
-			fmt.Printf("Returing due to dry-run mode\n")
-			return nil
-		}
-		orgsMissing := 0
-		var (
-			exists           bool
-			orgNamesMappings allMappings
-		)
-		thrN := getThreadsNum()
-		mut := &sync.RWMutex{}
-		orgsLoaded := false
-		processOrg := func(ch chan struct{}, comp string) {
-			defer func() {
-				if ch != nil {
-					ch <- struct{}{}
+		defer func() { _ = csvFile.Close() }()
+		writer := csv.NewWriter(csvFile)
+		fatalOnError(writer.Write([]string{"Name", "Emails", "Identities", "Enrollments"}))
+		for _, uidentity := range missingProfiles {
+			rols := ""
+			for _, rol := range uidentity.Enrollments {
+				rols += rol.Organization
+				if rol.Start.After(gDefaultStartDate) {
+					rols += " from:" + toYMDDate(rol.Start)
 				}
-			}()
+				if rol.End.Before(gDefaultEndDate) {
+					rols += " to:" + toYMDDate(rol.End)
+				}
+				rols += ","
+			}
+			if rols != "" {
+				rols = rols[:len(rols)-1]
+			}
+			idents := ""
+			for source, userNames := range uidentity.Idents {
+				idents += source + ": ["
+				for _, userName := range userNames {
+					idents += userName + ","
+				}
+				idents = idents[:len(idents)-1] + "],"
+			}
+			if idents != "" {
+				idents = idents[:len(idents)-1]
+			}
+			err = writer.Write(
+				[]string{
+					uidentity.Profile.Name,
+					strings.Join(uidentity.Emails, ","),
+					idents,
+					rols,
+				},
+			)
+		}
+		writer.Flush()
+	}
+	fmt.Printf("%d orgs present in import files\n", len(orgs))
+	comp2id := make(map[string]int)
+	id2comp := make(map[int]string)
+	lcomp2id := make(map[string]int)
+	id2lcomp := make(map[int]string)
+	rows, err := query(db, "select id, name from organizations")
+	fatalOnError(err)
+	orgID := 0
+	orgName := ""
+	for rows.Next() {
+		fatalOnError(rows.Scan(&orgID, &orgName))
+		lOrgName := strings.ToLower(orgName)
+		comp2id[orgName] = orgID
+		id2comp[orgID] = orgName
+		lcomp2id[lOrgName] = orgID
+		id2lcomp[orgID] = lOrgName
+	}
+	fatalOnError(rows.Err())
+	fatalOnError(rows.Close())
+	if dry {
+		fmt.Printf("Returing due to dry-run mode\n")
+		return nil
+	}
+	orgsMissing := 0
+	var orgNamesMappings allMappings
+	thrN := getThreadsNum()
+	mut := &sync.RWMutex{}
+	orgsLoaded := false
+	processOrg := func(ch chan struct{}, comp string) {
+		defer func() {
+			if ch != nil {
+				ch <- struct{}{}
+			}
+		}()
+		mut.RLock()
+		cid, exists := comp2id[comp]
+		mut.RUnlock()
+		if !exists {
+			lComp := strings.ToLower(comp)
 			mut.RLock()
-			cid, exists := comp2id[comp]
+			_, exists = lcomp2id[lComp]
 			mut.RUnlock()
 			if !exists {
-				lComp := strings.ToLower(comp)
 				mut.RLock()
-				_, exists = lcomp2id[lComp]
-				mut.RUnlock()
-				if !exists {
-					mut.RLock()
-					if !orgsLoaded {
-						mut.RUnlock()
-						mut.Lock()
-						orgsMap := os.Getenv("ORGS_MAP_FILE")
-						if orgsMap != "" {
-							var data []byte
-							data, err = ioutil.ReadFile(orgsMap)
-							fatalOnError(err)
-							fatalOnError(yaml.Unmarshal(data, &orgNamesMappings))
-						}
-						orgsLoaded = true
-						mut.Unlock()
-					} else {
-						mut.RUnlock()
-					}
-					if dbg {
-						fmt.Printf("missing '%s'\n", comp)
-					}
-					found := false
-					for _, mapping := range orgNamesMappings.Mappings {
-						re := mapping[0]
-						re = strings.Replace(re, "\\\\", "\\", -1)
-						if dbg {
-							fmt.Printf("check if '%s' matches '%s'\n", comp, re)
-						}
-						// if comp matches re then to is our mapped company name
-						rows, err := query(db, "select ? regexp ?", comp, re)
-						fatalOnError(err)
-						var m int
-						for rows.Next() {
-							fatalOnError(rows.Scan(&m))
-						}
-						fatalOnError(rows.Err())
-						fatalOnError(rows.Close())
-						if m > 0 {
-							if dbg {
-								fmt.Printf("'%s' matches '%s'\n", comp, re)
-							}
-							to := mapping[1]
-							mut.RLock()
-							cid, exists := comp2id[to]
-							mut.RUnlock()
-							if exists {
-								if dbg {
-									fmt.Printf("added mapping '%s' -> '%s' -> %d\n", comp, to, cid)
-								}
-								mut.Lock()
-								comp2id[comp] = cid
-								id2comp[cid] = comp
-								mut.Unlock()
-								found = true
-								break
-							} else {
-								fmt.Printf("'%s' maps to '%s' which cannot be found\n", comp, to)
-							}
-						} else {
-							if dbg {
-								fmt.Printf("'%s' is not matching '%s'\n", comp, re)
-							}
-						}
-					}
-					if found {
-						return
-					}
-					if dbg {
-						fmt.Printf("missing '%s' (trying lower case '%s')\n", comp, lComp)
-					}
-					for _, mapping := range orgNamesMappings.Mappings {
-						re := mapping[0]
-						re = strings.Replace(re, "\\\\", "\\", -1)
-						if dbg {
-							fmt.Printf("check if '%s' matches '%s'\n", lComp, re)
-						}
-						// if lComp matches re then to is our mapped company name
-						rows, err := query(db, "select ? regexp ?", lComp, re)
-						fatalOnError(err)
-						var m int
-						for rows.Next() {
-							fatalOnError(rows.Scan(&m))
-						}
-						fatalOnError(rows.Err())
-						fatalOnError(rows.Close())
-						if m > 0 {
-							if dbg {
-								fmt.Printf("'%s' matches '%s'\n", lComp, re)
-							}
-							to := mapping[1]
-							mut.RLock()
-							cid, exists := lcomp2id[to]
-							mut.RUnlock()
-							if exists {
-								if dbg {
-									fmt.Printf("added mapping '%s' -> '%s' -> %d\n", lComp, to, cid)
-								}
-								mut.Lock()
-								comp2id[comp] = cid
-								id2comp[cid] = comp
-								mut.Unlock()
-								found = true
-								break
-							} else {
-								fmt.Printf("'%s' maps to '%s' which cannot be found\n", lComp, to)
-							}
-						} else {
-							if dbg {
-								fmt.Printf("'%s' is not matching '%s'\n", lComp, re)
-							}
-						}
-					}
-					if !found {
-						fmt.Printf("nothing found for '%s'\n", comp)
-						mut.Lock()
-						orgsMissing++
-						missingOrgs[comp] = struct{}{}
-						mut.Unlock()
-					}
-				} else {
+				if !orgsLoaded {
+					mut.RUnlock()
 					mut.Lock()
-					comp2id[comp] = cid
-					id2comp[cid] = comp
+					orgsMap := os.Getenv("ORGS_MAP_FILE")
+					if orgsMap != "" {
+						var data []byte
+						data, err = ioutil.ReadFile(orgsMap)
+						fatalOnError(err)
+						fatalOnError(yaml.Unmarshal(data, &orgNamesMappings))
+					}
+					orgsLoaded = true
+					mut.Unlock()
+				} else {
+					mut.RUnlock()
+				}
+				if dbg {
+					fmt.Printf("missing '%s'\n", comp)
+				}
+				found := false
+				for _, mapping := range orgNamesMappings.Mappings {
+					re := mapping[0]
+					re = strings.Replace(re, "\\\\", "\\", -1)
+					if dbg {
+						fmt.Printf("check if '%s' matches '%s'\n", comp, re)
+					}
+					// if comp matches re then to is our mapped company name
+					rows, err := query(db, "select ? regexp ?", comp, re)
+					fatalOnError(err)
+					var m int
+					for rows.Next() {
+						fatalOnError(rows.Scan(&m))
+					}
+					fatalOnError(rows.Err())
+					fatalOnError(rows.Close())
+					if m > 0 {
+						if dbg {
+							fmt.Printf("'%s' matches '%s'\n", comp, re)
+						}
+						to := mapping[1]
+						mut.RLock()
+						cid, exists := comp2id[to]
+						mut.RUnlock()
+						if exists {
+							if dbg {
+								fmt.Printf("added mapping '%s' -> '%s' -> %d\n", comp, to, cid)
+							}
+							mut.Lock()
+							comp2id[comp] = cid
+							id2comp[cid] = comp
+							mut.Unlock()
+							found = true
+							break
+						} else {
+							fmt.Printf("'%s' maps to '%s' which cannot be found\n", comp, to)
+						}
+					} else {
+						if dbg {
+							fmt.Printf("'%s' is not matching '%s'\n", comp, re)
+						}
+					}
+				}
+				if found {
+					return
+				}
+				if dbg {
+					fmt.Printf("missing '%s' (trying lower case '%s')\n", comp, lComp)
+				}
+				for _, mapping := range orgNamesMappings.Mappings {
+					re := mapping[0]
+					re = strings.Replace(re, "\\\\", "\\", -1)
+					if dbg {
+						fmt.Printf("check if '%s' matches '%s'\n", lComp, re)
+					}
+					// if lComp matches re then to is our mapped company name
+					rows, err := query(db, "select ? regexp ?", lComp, re)
+					fatalOnError(err)
+					var m int
+					for rows.Next() {
+						fatalOnError(rows.Scan(&m))
+					}
+					fatalOnError(rows.Err())
+					fatalOnError(rows.Close())
+					if m > 0 {
+						if dbg {
+							fmt.Printf("'%s' matches '%s'\n", lComp, re)
+						}
+						to := mapping[1]
+						mut.RLock()
+						cid, exists := lcomp2id[to]
+						mut.RUnlock()
+						if exists {
+							if dbg {
+								fmt.Printf("added mapping '%s' -> '%s' -> %d\n", lComp, to, cid)
+							}
+							mut.Lock()
+							comp2id[comp] = cid
+							id2comp[cid] = comp
+							mut.Unlock()
+							found = true
+							break
+						} else {
+							fmt.Printf("'%s' maps to '%s' which cannot be found\n", lComp, to)
+						}
+					} else {
+						if dbg {
+							fmt.Printf("'%s' is not matching '%s'\n", lComp, re)
+						}
+					}
+				}
+				if !found {
+					fmt.Printf("nothing found for '%s'\n", comp)
+					mut.Lock()
+					orgsMissing++
+					missingOrgs[comp] = struct{}{}
 					mut.Unlock()
 				}
+			} else {
+				mut.Lock()
+				comp2id[comp] = cid
+				id2comp[cid] = comp
+				mut.Unlock()
 			}
 		}
-		if thrN > 1 {
-			ch := make(chan struct{})
-			nThreads := 0
-			for org := range orgs {
-				go processOrg(ch, org)
-				nThreads++
-				if nThreads == thrN {
-					<-ch
-					nThreads--
-				}
-			}
-			for nThreads > 0 {
+	}
+	if thrN > 1 {
+		ch := make(chan struct{})
+		nThreads := 0
+		for org := range orgs {
+			go processOrg(ch, org)
+			nThreads++
+			if nThreads == thrN {
 				<-ch
 				nThreads--
 			}
-		} else {
-			for org := range orgs {
-				processOrg(nil, org)
-			}
 		}
-		// fmt.Printf("comp2id:%+v\nod2comp:%+v\n", comp2id, id2comp)
-		if len(missingOrgs) > 0 {
-			csvFile, err := os.Create(os.Getenv("MISSING_ORGS_CSV"))
-			fatalOnError(err)
-			defer func() { _ = csvFile.Close() }()
-			writer := csv.NewWriter(csvFile)
-			fatalOnError(writer.Write([]string{"Organization Name"}))
-			for org := range missingOrgs {
-				err = writer.Write([]string{org})
-			}
-			writer.Flush()
+		for nThreads > 0 {
+			<-ch
+			nThreads--
 		}
-		fmt.Printf("Number of organizations: %d, missing: %d\n", len(comp2id), orgsMissing)
-		countriesAdded := 0
-		for _, country := range countries {
-			exists = addCountry(db, country)
-			if !exists {
-				countriesAdded++
-			}
+	} else {
+		for org := range orgs {
+			processOrg(nil, org)
 		}
-		fmt.Printf("Number of countries: %d, added new: %d\n", len(countries), countriesAdded)
+	}
+	// fmt.Printf("comp2id:%+v\nod2comp:%+v\n", comp2id, id2comp)
+	if len(missingOrgs) > 0 {
+		fn := os.Getenv("MISSING_ORGS_CSV")
+		if fn == "" {
+			fn = "missing_orgs"
+		}
+		csvFile, err := os.Create(fn + timeSuff() + ".csv")
+		fatalOnError(err)
+		defer func() { _ = csvFile.Close() }()
+		writer := csv.NewWriter(csvFile)
+		fatalOnError(writer.Write([]string{"Organization Name"}))
+		for org := range missingOrgs {
+			err = writer.Write([]string{org})
+		}
+		writer.Flush()
+	}
+	fmt.Printf("Number of organizations: %d, missing: %d\n", len(comp2id), orgsMissing)
+	/*
 		var mtx *sync.RWMutex
 		if thrN > 1 {
 			mtx = &sync.RWMutex{}

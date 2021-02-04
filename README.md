@@ -9,4 +9,4 @@ Import FINOS identities YAML file.
 - Initialize the empty SoringHat database: `USR=root PASS=rootpwd SH_USR=sortinghat SH_PASS=pwd SH_DB=sortinghat ./mariadb_init.sh`.
 - Restore `prod` dump on this new database: `mysql -h127.0.0.1 -P13306 -prootpwd -uroot sortinghat < dump.sql`.
 - Run the import locally (as cron executes it): `IMPORT_DIR="`realpath .`" ./finos_local.sha local`.
-- If you just want to run import on already fetched file: `` MISSING_ORGS_CSV=finos_missing.csv ORGS_MAP_FILE=../dev-analytics-affiliation/map_org_names.yaml REPLACE='' COMPARE=1 PROJECT_SLUG=finos-f SH_DSN="`cat ../da-ds-gha/DB_CONN.local.secret`" ./import-identities ./identities.yaml ``.
+- If you just want to run import on already fetched file: `` MISSING_ORGS_CSV=finos_missing_orgs MISSING_PROFILES_CSV=finos_missing_profiles ORGS_MAP_FILE=../dev-analytics-affiliation/map_org_names.yaml REPLACE='' COMPARE=1 PROJECT_SLUG=finos-f SH_DSN="`cat ../da-ds-gha/DB_CONN.local.secret`" ./import-identities ./identities.yaml ``.
