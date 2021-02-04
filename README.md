@@ -1,2 +1,7 @@
-# dev-analytics-import-finos-identities
-Imports identities data from a YAML file provided by FINOS project
+# import-identities
+
+Import FINOS identities YAML file.
+
+# Usage
+
+TODO

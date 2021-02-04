@@ -13,3 +13,21 @@
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
+
+# VIM
+*.swp
+
+# Sensitive SQLs and map files
+sortinghat.sql
+.organizationmap
+.mailmap
+
+# Go binary
+import-identities
+
+# Others
+out
+*.json
+*.csv
+dump.sql
+*.secret
