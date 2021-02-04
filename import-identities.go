@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"reflect"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -93,41 +95,114 @@ func (u *shUIdentity) String() string {
 	return fmt.Sprintf("{UUID:%s,Profile:%s,Emails:%v,Enrollments:%s,Others:%v}", u.UUID, u.Profile.String(), u.Emails, rols, u.Others)
 }
 
-func postprocessIdentities(uidentitiesAry []shUIdentity, unknownsAry []interface{}, uidentitiesMap map[string]shUIdentity) {
+func queryOut(query string, args ...interface{}) {
+	fmt.Printf("%s\n", query)
+	if len(args) > 0 {
+		s := ""
+		for vi, vv := range args {
+			switch v := vv.(type) {
+			case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, complex64, complex128, string, bool, time.Time:
+				s += fmt.Sprintf("%d:%+v ", vi+1, v)
+			case *int, *int8, *int16, *int32, *int64, *uint, *uint8, *uint16, *uint32, *uint64, *float32, *float64, *complex64, *complex128, *string, *bool, *time.Time:
+				s += fmt.Sprintf("%d:%+v ", vi+1, v)
+			case nil:
+				s += fmt.Sprintf("%d:(null) ", vi+1)
+			default:
+				s += fmt.Sprintf("%d:%+v ", vi+1, reflect.ValueOf(vv).Elem())
+			}
+		}
+		fmt.Printf("[%s]\n", s)
+	}
+}
+
+func query(db *sql.DB, query string, args ...interface{}) (*sql.Rows, error) {
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		queryOut(query, args...)
+	}
+	return rows, err
+}
+
+func exec(db *sql.DB, skip, query string, args ...interface{}) (sql.Result, error) {
+	res, err := db.Exec(query, args...)
+	if err != nil {
+		if skip == "" || !strings.Contains(err.Error(), skip) {
+			queryOut(query, args...)
+		}
+	}
+	return res, err
+}
+
+func lookupUIdentity(db *sql.DB, uidentity *shUIdentity) {
+	name := uidentity.Profile.Name
+	rows, err := query(db, "select uuid from profiles where name = ?", name)
+	fatalOnError(err)
+	uuid := ""
+	fetched := false
+	multi := false
+	for rows.Next() {
+		fatalOnError(rows.Scan(&uuid))
+		if fetched {
+			multi = true
+			break
+		}
+		fetched = true
+	}
+	fatalOnError(rows.Err())
+	fatalOnError(rows.Close())
+	setUUID := func(uid string) {
+		uidentity.UUID = uid
+		uidentity.Profile.UUID = uid
+		for i := range uidentity.Enrollments {
+			uidentity.Enrollments[i].UUID = uid
+		}
+	}
+	if uuid != "" && fetched && !multi {
+		setUUID(uuid)
+		return
+	}
+	fmt.Printf("%s -> (%s,%v,%v)\n", name, uuid, fetched, multi)
+}
+
+func postprocessIdentities(db *sql.DB, uidentitiesAry []shUIdentity, unknownsAry []interface{}, uidentitiesMap map[string]shUIdentity) {
 	for i, uidentity := range uidentitiesAry {
 		if uidentity.Profile.Name == "" {
-			fatalf("profile without name: %+v\n", uidentity)
+			fatalf("profile without name: %+v\n", uidentity.String())
 		}
 		if len(uidentity.Enrollments) == 0 {
 			continue
 		}
 		iAry, ok := unknownsAry[i].(map[interface{}]interface{})
 		if !ok {
-			fatalf("cannot parse dynamic datasource identities list fields: %+v\n", uidentity)
+			fatalf("cannot parse dynamic datasource identities list fields: %+v\n", uidentity.String())
 		}
 		uidentity.Others = make(map[string][]string)
 		for ik, iv := range iAry {
 			k, ok := ik.(string)
 			if !ok {
-				fatalf("dynamic datasource identities list - cannot parse key %v,%T as string: %+v\n", ik, ik, uidentity)
+				fatalf("dynamic datasource identities list - cannot parse key %v,%T as string: %+v\n", ik, ik, uidentity.String())
 			}
 			if k == "profile" || k == "enrollments" || k == "email" {
 				continue
 			}
 			v, ok := iv.([]interface{})
 			if !ok {
-				fatalf("dynamic datasource identities list - cannot parse key %s value %v,%T as array: %+v\n", k, iv, iv, uidentity)
+				fatalf("dynamic datasource identities list - cannot parse key %s value %v,%T as array: %+v\n", k, iv, iv, uidentity.String())
 			}
-			fmt.Printf("%s,(%v,%v,%v)\n", k, v, ok, iv)
 			others := []string{}
 			for _, it := range v {
-				others = append(others, it.(string))
+				its, ok := it.(string)
+				if !ok {
+					fatalf("dynamic datasource identities list - cannot parse key %s value %v item %v,%v as string: %+v\n", k, v, it, it, uidentity.String())
+					continue
+				}
+				others = append(others, its)
 			}
 			uidentity.Others[k] = others
 		}
 		for ei, enrollment := range uidentity.Enrollments {
 			if enrollment.Organization == "" {
-				fatalf("enrollment without organization name name: %+v i %+v\n", enrollment, uidentity)
+				fatalf("enrollment without organization name: %+v in %+v\n", enrollment.String(), uidentity.String())
 			}
 			if enrollment.Start.IsZero() {
 				uidentity.Enrollments[ei].Start = gDefaultStartDate
@@ -136,7 +211,13 @@ func postprocessIdentities(uidentitiesAry []shUIdentity, unknownsAry []interface
 				uidentity.Enrollments[ei].End = gDefaultEndDate
 			}
 		}
-		// FIXME: find UUID for this uidentity using all data we have here
+		lookupUIdentity(db, &uidentity)
+		if uidentity.UUID == "" {
+			// FIXME
+			// fmt.Printf("warning: cannot find %s identity in our database\n", uidentity.String())
+			continue
+		}
+		// FIXME
 		fmt.Printf("%s\n", uidentity.String())
 		uidentitiesMap[uidentity.UUID] = uidentity
 	}
@@ -170,7 +251,7 @@ func importYAMLfiles(db *sql.DB, fileNames []string) error {
 		fatalOnError(yaml.Unmarshal(contents, &yAry))
 		fatalOnError(yaml.Unmarshal(contents, &iAry))
 		data.UIdentities = make(map[string]shUIdentity)
-		postprocessIdentities(yAry, iAry, data.UIdentities)
+		postprocessIdentities(db, yAry, iAry, data.UIdentities)
 		fmt.Printf("%s: %d records\n", fileName, len(data.UIdentities))
 		fmt.Printf("%+v\n", data)
 		for _, uidentity := range data.UIdentities {
