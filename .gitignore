@@ -29,5 +29,6 @@ import-identities
 out
 *.json
 *.csv
-dump.sql
+*.yaml
+*.sql
 *.secret
