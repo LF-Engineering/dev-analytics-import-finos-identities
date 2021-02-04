@@ -119,6 +119,8 @@ func (u *shUIdentity) String() string {
 	}
 	if rols != "[" {
 		rols = rols[:len(rols)-1] + "]"
+	} else {
+		rols = "[]"
 	}
 	return fmt.Sprintf("{UUID:%s,Profile:%s,Emails:%v,Enrollments:%s,Idents:%v}", u.UUID, u.Profile.String(), u.Emails, rols, u.Idents)
 }
@@ -530,6 +532,33 @@ func postprocessIdentities(db *sql.DB, dbg bool, uidentitiesAry []shUIdentity, u
 	return
 }
 
+func cleanupUnaffiliated(dbg bool, uidentities []shUIdentity) {
+	// Remove: Unaffiliated
+	// Possibly: Individual Contributor
+	for i, uidentity := range uidentities {
+		for j, enrollment := range uidentity.Enrollments {
+			if enrollment.Organization == "Unaffiliated" {
+				//a[i] = a[len(a)-1] // Copy last element to index i.
+				//a[len(a)-1] = ""   // Erase last element (write zero value).
+				//a = a[:len(a)-1]   // Truncate slice.
+				last := len(uidentities[i].Enrollments) - 1
+				if last == 0 {
+					uidentities[i].Enrollments = []shEnrollment{}
+					if dbg {
+						fmt.Printf("removed %s enrollment: no enrollments left: %s\n", enrollment.Organization, uidentities[i].String())
+					}
+					continue
+				}
+				uidentities[i].Enrollments[j] = uidentities[i].Enrollments[last]
+				uidentities[i].Enrollments = uidentities[i].Enrollments[:last]
+				if dbg {
+					fmt.Printf("removed %s enrollment: new enrollments: %v: %s\n", enrollment.Organization, uidentities[i].Enrollments, uidentities[i].String())
+				}
+			}
+		}
+	}
+}
+
 func importYAMLfiles(db *sql.DB, fileNames []string) error {
 	dbg := os.Getenv("DEBUG") != ""
 	dry := os.Getenv("DRY") != ""
@@ -542,7 +571,7 @@ func importYAMLfiles(db *sql.DB, fileNames []string) error {
 	gDebugSQL = os.Getenv("DEBUG_SQL") != ""
 	nFiles := len(fileNames)
 	if dbg {
-		fmt.Printf("Importing %d files, debug: %v, dry-run: %v, compare mode: %v, replace mode: %v\n", nFiles, dbg, dry, compare, replace)
+		fmt.Printf("importing %d files, debug: %v, dry-run: %v, compare mode: %v, replace mode: %v\n", nFiles, dbg, dry, compare, replace)
 	}
 	uidentitiesAry := []map[string]shUIdentity{}
 	orgs := make(map[string]struct{})
@@ -553,7 +582,7 @@ func importYAMLfiles(db *sql.DB, fileNames []string) error {
 		return fmt.Sprintf("_%04d%02d%02d%02d%02d%02d%09d", dt.Year(), dt.Month(), dt.Day(), dt.Hour(), dt.Minute(), dt.Second(), dt.Nanosecond())
 	}
 	for i, fileName := range fileNames {
-		fmt.Printf("Importing %d/%d: %s\n", i+1, nFiles, fileName)
+		fmt.Printf("importing %d/%d: %s\n", i+1, nFiles, fileName)
 		var (
 			yAry []shUIdentity
 			iAry []interface{}
@@ -563,6 +592,7 @@ func importYAMLfiles(db *sql.DB, fileNames []string) error {
 		fatalOnError(err)
 		fatalOnError(yaml.Unmarshal(contents, &yAry))
 		fatalOnError(yaml.Unmarshal(contents, &iAry))
+		cleanupUnaffiliated(dbg, yAry)
 		data.UIdentities = make(map[string]shUIdentity)
 		missing := postprocessIdentities(db, dbg, yAry, iAry, data.UIdentities)
 		for _, miss := range missing {
@@ -1144,8 +1174,7 @@ func processUIdentity(ch chan struct{}, mtx *sync.RWMutex, db *sql.DB, uidentity
 	}
 	// found, they differ (or compare mode is off) and replace mode is on
 	// delete them
-	// FIXME
-	fmt.Printf("state (%v,%v,%v,%v)\n", fetched, same, compare, replace)
+	// fmt.Printf("state (%v,%v,%v,%v)\n", fetched, same, compare, replace)
 	if fetched && !same && replace {
 		if dbg {
 			fmt.Printf("deleting enrollments for %s/%s\n", uidentity.UUID, *gProjectSlug)
