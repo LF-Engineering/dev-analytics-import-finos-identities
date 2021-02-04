@@ -27,6 +27,7 @@ const (
 )
 
 var (
+	gDebugSQL         bool
 	gProjectSlug      *string
 	gDefaultStartDate = time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC)
 	gDefaultEndDate   = time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -144,7 +145,7 @@ func queryOut(query string, args ...interface{}) {
 
 func query(db *sql.DB, query string, args ...interface{}) (*sql.Rows, error) {
 	rows, err := db.Query(query, args...)
-	if err != nil {
+	if err != nil || gDebugSQL {
 		queryOut(query, args...)
 	}
 	return rows, err
@@ -152,8 +153,8 @@ func query(db *sql.DB, query string, args ...interface{}) (*sql.Rows, error) {
 
 func exec(db *sql.DB, skip, query string, args ...interface{}) (sql.Result, error) {
 	res, err := db.Exec(query, args...)
-	if err != nil {
-		if skip == "" || !strings.Contains(err.Error(), skip) {
+	if err != nil || gDebugSQL {
+		if skip == "" || !strings.Contains(err.Error(), skip) || gDebugSQL {
 			queryOut(query, args...)
 		}
 	}
@@ -418,8 +419,8 @@ func postprocessIdentities(db *sql.DB, dbg bool, uidentitiesAry []shUIdentity, u
 		uuid := ""
 		result.i = idx
 		defer func() {
+			result.uuid = uuid
 			if ch != nil {
-				result.uuid = uuid
 				ch <- result
 			}
 		}()
@@ -538,6 +539,7 @@ func importYAMLfiles(db *sql.DB, fileNames []string) error {
 	if projectSlug != "" {
 		gProjectSlug = &projectSlug
 	}
+	gDebugSQL = os.Getenv("DEBUG_SQL") != ""
 	nFiles := len(fileNames)
 	if dbg {
 		fmt.Printf("Importing %d files, debug: %v, dry-run: %v, compare mode: %v, replace mode: %v\n", nFiles, dbg, dry, compare, replace)
@@ -717,9 +719,9 @@ func importYAMLfiles(db *sql.DB, fileNames []string) error {
 							}
 							mut.Lock()
 							comp2id[comp] = cid
-							// WAS
-							// id2comp[cid] = comp
-							id2comp[cid] = to
+							// Consider
+							id2comp[cid] = comp
+							//id2comp[cid] = to
 							mut.Unlock()
 							found = true
 							break
@@ -767,9 +769,9 @@ func importYAMLfiles(db *sql.DB, fileNames []string) error {
 							}
 							mut.Lock()
 							comp2id[comp] = cid
-							// WAS
-							// id2comp[cid] = comp
-							id2comp[cid] = to
+							// Consider
+							id2comp[cid] = comp
+							// id2comp[cid] = to
 							mut.Unlock()
 							found = true
 							break
@@ -1094,6 +1096,22 @@ func processUIdentity(ch chan struct{}, mtx *sync.RWMutex, db *sql.DB, uidentity
 				continue
 			}
 			uidentity.Enrollments[i].OrgID = orgID
+			if mtx != nil {
+				mtx.RLock()
+			}
+			org, ok := id2comp[orgID]
+			if mtx != nil {
+				mtx.RUnlock()
+			}
+			if !ok {
+				continue
+			}
+			if org != enrollment.Organization {
+				if dbg {
+					fmt.Printf("updaing org name that would be mapped: '%s' -> '%s'\n", enrollment.Organization, org)
+				}
+				uidentity.Enrollments[i].Organization = org
+			}
 		}
 	}
 	if fetched {
@@ -1120,14 +1138,18 @@ func processUIdentity(ch chan struct{}, mtx *sync.RWMutex, db *sql.DB, uidentity
 		same = !enrollmentsDiffer(uidentity.Enrollments, existingEnrollments)
 		if same {
 			sts.enrollmentsSame++
-			// FIXME
 		} else if dbg {
 			fmt.Printf("Enrollments differ: %+v != %+v\n", rolsString(uidentity.Enrollments), rolsString(existingEnrollments))
 		}
 	}
 	// found, they differ (or compare mode is off) and replace mode is on
 	// delete them
+	// FIXME
+	fmt.Printf("state (%v,%v,%v,%v)\n", fetched, same, compare, replace)
 	if fetched && !same && replace {
+		if dbg {
+			fmt.Printf("deleting enrollments for %s/%s\n", uidentity.UUID, *gProjectSlug)
+		}
 		if gProjectSlug == nil {
 			_, err := exec(db, "", "delete from enrollments where uuid = ? and project_slug is null", uidentity.UUID)
 			fatalOnError(err)
@@ -1141,6 +1163,9 @@ func processUIdentity(ch chan struct{}, mtx *sync.RWMutex, db *sql.DB, uidentity
 	// none fetched or some fetched and replace mode is on
 	// add them
 	if !same && (!fetched || (fetched && replace)) {
+		if dbg {
+			fmt.Printf("adding enrollments for %s/%s\n", uidentity.UUID, *gProjectSlug)
+		}
 		if !compIDCalculated {
 			getCompIds()
 		}
@@ -1148,6 +1173,9 @@ func processUIdentity(ch chan struct{}, mtx *sync.RWMutex, db *sql.DB, uidentity
 			if enrollment.OrgID <= 0 {
 				sts.enrollmentsSkipped++
 				continue
+			}
+			if dbg {
+				fmt.Printf("adding enrollment for %s/%s/%s\n", uidentity.UUID, *gProjectSlug, enrollment.String())
 			}
 			_, err := exec(
 				db,
