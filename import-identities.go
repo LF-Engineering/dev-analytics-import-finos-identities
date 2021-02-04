@@ -133,12 +133,16 @@ func exec(db *sql.DB, skip, query string, args ...interface{}) (sql.Result, erro
 	return res, err
 }
 
-func lookupUIdentity(db *sql.DB, uidentity *shUIdentity) {
+func lookupUIdentity(db *sql.DB, dbg bool, uidentity *shUIdentity) (uuid string) {
+	printf := func(fmts string, args ...interface{}) {
+		if dbg {
+			fmt.Printf(fmts, args...)
+		}
+	}
 	name := uidentity.Profile.Name
 	// by name
 	rows, err := query(db, "select distinct uuid from profiles where name = ?", name)
 	fatalOnError(err)
-	uuid := ""
 	fetched := false
 	multi := false
 	for rows.Next() {
@@ -151,19 +155,11 @@ func lookupUIdentity(db *sql.DB, uidentity *shUIdentity) {
 	}
 	fatalOnError(rows.Err())
 	fatalOnError(rows.Close())
-	setUUID := func(uid string) {
-		uidentity.UUID = uid
-		uidentity.Profile.UUID = uid
-		for i := range uidentity.Enrollments {
-			uidentity.Enrollments[i].UUID = uid
-		}
-	}
 	if uuid != "" && fetched && !multi {
-		fmt.Printf("found by name '%s' -> %s\n", name, uuid)
-		setUUID(uuid)
+		printf("found by name '%s' -> %s\n", name, uuid)
 		return
 	}
-	fmt.Printf("not found by name '%s' -> (%s,%v,%v)\n", name, uuid, fetched, multi)
+	printf("not found by name '%s' -> (%s,%v,%v)\n", name, uuid, fetched, multi)
 	// by source/username
 	for source, userNames := range uidentity.Others {
 		for _, userName := range userNames {
@@ -183,13 +179,12 @@ func lookupUIdentity(db *sql.DB, uidentity *shUIdentity) {
 			fatalOnError(rows.Err())
 			fatalOnError(rows.Close())
 			if uuid != "" && fetched && !multi {
-				fmt.Printf("found by source/username '%s/%s' -> %s\n", source, userName, uuid)
-				setUUID(uuid)
+				printf("found by source/username '%s/%s' -> %s\n", source, userName, uuid)
 				return
 			}
-			fmt.Printf("not found by source/username '%s/%s' -> (%s,%v,%v)\n", source, userName, uuid, fetched, multi)
+			printf("not found by source/username '%s/%s' -> (%s,%v,%v)\n", source, userName, uuid, fetched, multi)
 		}
-		fmt.Printf("not found by source/usernames '%s/%v' -> (%s,%v,%v)\n", source, userNames, uuid, fetched, multi)
+		printf("not found by source/usernames '%s/%v' -> (%s,%v,%v)\n", source, userNames, uuid, fetched, multi)
 	}
 	// by email
 	for _, email := range uidentity.Emails {
@@ -209,11 +204,10 @@ func lookupUIdentity(db *sql.DB, uidentity *shUIdentity) {
 		fatalOnError(rows.Err())
 		fatalOnError(rows.Close())
 		if uuid != "" && fetched && !multi {
-			fmt.Printf("found by email '%s' -> %s\n", email, uuid)
-			setUUID(uuid)
+			printf("found by email '%s' -> %s\n", email, uuid)
 			return
 		}
-		fmt.Printf("not found by email '%s' -> (%s,%v,%v)\n", email, uuid, fetched, multi)
+		printf("not found by email '%s' -> (%s,%v,%v)\n", email, uuid, fetched, multi)
 	}
 	// by name & source/username
 	for source, userNames := range uidentity.Others {
@@ -234,13 +228,12 @@ func lookupUIdentity(db *sql.DB, uidentity *shUIdentity) {
 			fatalOnError(rows.Err())
 			fatalOnError(rows.Close())
 			if uuid != "" && fetched && !multi {
-				fmt.Printf("found by name/source/username '%s/%s/%s' -> %s\n", name, source, userName, uuid)
-				setUUID(uuid)
+				printf("found by name/source/username '%s/%s/%s' -> %s\n", name, source, userName, uuid)
 				return
 			}
-			fmt.Printf("not found by name/source/username '%s/%s/%s' -> (%s,%v,%v)\n", name, source, userName, uuid, fetched, multi)
+			printf("not found by name/source/username '%s/%s/%s' -> (%s,%v,%v)\n", name, source, userName, uuid, fetched, multi)
 		}
-		fmt.Printf("not found by name/source/usernames '%s/%s/%v' -> (%s,%v,%v)\n", name, source, userNames, uuid, fetched, multi)
+		printf("not found by name/source/usernames '%s/%s/%v' -> (%s,%v,%v)\n", name, source, userNames, uuid, fetched, multi)
 	}
 	// by name & email
 	for _, email := range uidentity.Emails {
@@ -260,11 +253,10 @@ func lookupUIdentity(db *sql.DB, uidentity *shUIdentity) {
 		fatalOnError(rows.Err())
 		fatalOnError(rows.Close())
 		if uuid != "" && fetched && !multi {
-			fmt.Printf("found by name/email '%s/%s' -> %s\n", name, email, uuid)
-			setUUID(uuid)
+			printf("found by name/email '%s/%s' -> %s\n", name, email, uuid)
 			return
 		}
-		fmt.Printf("not found by name/email '%s/%s' -> (%s,%v,%v)\n", name, email, uuid, fetched, multi)
+		printf("not found by name/email '%s/%s' -> (%s,%v,%v)\n", name, email, uuid, fetched, multi)
 	}
 	// by source/username/email
 	for source, userNames := range uidentity.Others {
@@ -286,15 +278,14 @@ func lookupUIdentity(db *sql.DB, uidentity *shUIdentity) {
 				fatalOnError(rows.Err())
 				fatalOnError(rows.Close())
 				if uuid != "" && fetched && !multi {
-					fmt.Printf("found by email/source/username '%s/%s/%s' -> %s\n", email, source, userName, uuid)
-					setUUID(uuid)
+					printf("found by email/source/username '%s/%s/%s' -> %s\n", email, source, userName, uuid)
 					return
 				}
-				fmt.Printf("not found by email/source/username '%s/%s/%s' -> (%s,%v,%v)\n", email, source, userName, uuid, fetched, multi)
+				printf("not found by email/source/username '%s/%s/%s' -> (%s,%v,%v)\n", email, source, userName, uuid, fetched, multi)
 			}
-			fmt.Printf("not found by email/source/usernames '%s/%s/%v' -> (%s,%v,%v)\n", email, source, userNames, uuid, fetched, multi)
+			printf("not found by email/source/usernames '%s/%s/%v' -> (%s,%v,%v)\n", email, source, userNames, uuid, fetched, multi)
 		}
-		fmt.Printf("not found by emails/source/usernames '%sv/%s/%v' -> (%s,%v,%v)\n", uidentity.Emails, source, userNames, uuid, fetched, multi)
+		printf("not found by emails/source/usernames '%sv/%s/%v' -> (%s,%v,%v)\n", uidentity.Emails, source, userNames, uuid, fetched, multi)
 	}
 	// by name/source/username/email
 	for source, userNames := range uidentity.Others {
@@ -316,19 +307,27 @@ func lookupUIdentity(db *sql.DB, uidentity *shUIdentity) {
 				fatalOnError(rows.Err())
 				fatalOnError(rows.Close())
 				if uuid != "" && fetched && !multi {
-					fmt.Printf("found by name/email/source/username '%s/%s/%s/%s' -> %s\n", name, email, source, userName, uuid)
-					setUUID(uuid)
+					printf("found by name/email/source/username '%s/%s/%s/%s' -> %s\n", name, email, source, userName, uuid)
 					return
 				}
-				fmt.Printf("not found by name/email/source/username '%s/%s/%s/%s' -> (%s,%v,%v)\n", name, email, source, userName, uuid, fetched, multi)
+				printf("not found by name/email/source/username '%s/%s/%s/%s' -> (%s,%v,%v)\n", name, email, source, userName, uuid, fetched, multi)
 			}
-			fmt.Printf("not found by name/email/source/usernames '%s/%s/%s/%v' -> (%s,%v,%v)\n", name, email, source, userNames, uuid, fetched, multi)
+			printf("not found by name/email/source/usernames '%s/%s/%s/%v' -> (%s,%v,%v)\n", name, email, source, userNames, uuid, fetched, multi)
 		}
-		fmt.Printf("not found by name/emails/source/usernames '%s/%v/%s/%v' -> (%s,%v,%v)\n", name, uidentity.Emails, source, userNames, uuid, fetched, multi)
+		printf("not found by name/emails/source/usernames '%s/%v/%s/%v' -> (%s,%v,%v)\n", name, uidentity.Emails, source, userNames, uuid, fetched, multi)
 	}
+	uuid = ""
+	return
 }
 
-func postprocessIdentities(db *sql.DB, uidentitiesAry []shUIdentity, unknownsAry []interface{}, uidentitiesMap map[string]shUIdentity) {
+func postprocessIdentities(db *sql.DB, dbg bool, uidentitiesAry []shUIdentity, unknownsAry []interface{}, uidentitiesMap map[string]shUIdentity) (missing []shUIdentity) {
+	setUUID := func(uident *shUIdentity, uid string) {
+		uident.UUID = uid
+		uident.Profile.UUID = uid
+		for i := range uident.Enrollments {
+			uident.Enrollments[i].UUID = uid
+		}
+	}
 	for i, uidentity := range uidentitiesAry {
 		if uidentity.Profile.Name == "" {
 			fatalf("profile without name: %+v\n", uidentity.String())
@@ -375,16 +374,24 @@ func postprocessIdentities(db *sql.DB, uidentitiesAry []shUIdentity, unknownsAry
 				uidentity.Enrollments[ei].End = gDefaultEndDate
 			}
 		}
-		lookupUIdentity(db, &uidentity)
-		if uidentity.UUID == "" {
-			// FIXME
-			// fmt.Printf("warning: cannot find %s identity in our database\n", uidentity.String())
+		uuid := lookupUIdentity(db, dbg, &uidentity)
+		if uuid == "" {
+			if dbg {
+				fmt.Printf("warning: cannot find %s identity in our database\n", uidentity.String())
+			}
+			missing = append(missing, uidentity)
 			continue
 		}
-		// FIXME
-		fmt.Printf("%s\n", uidentity.String())
-		uidentitiesMap[uidentity.UUID] = uidentity
+		if dbg {
+			fmt.Printf("found %s\n", uidentity.String())
+		}
+		setUUID(&uidentity, uuid)
+		uidentitiesMap[uuid] = uidentity
 	}
+	if len(missing) > 0 {
+		fmt.Printf("cannot find %d profiles\n", len(missing))
+	}
+	return
 }
 
 func importYAMLfiles(db *sql.DB, fileNames []string) error {
@@ -415,9 +422,8 @@ func importYAMLfiles(db *sql.DB, fileNames []string) error {
 		fatalOnError(yaml.Unmarshal(contents, &yAry))
 		fatalOnError(yaml.Unmarshal(contents, &iAry))
 		data.UIdentities = make(map[string]shUIdentity)
-		postprocessIdentities(db, yAry, iAry, data.UIdentities)
+		postprocessIdentities(db, dbg, yAry, iAry, data.UIdentities)
 		fmt.Printf("%s: %d records\n", fileName, len(data.UIdentities))
-		fmt.Printf("%+v\n", data)
 		for _, uidentity := range data.UIdentities {
 			for _, enrollment := range uidentity.Enrollments {
 				orgs[enrollment.Organization] = struct{}{}
