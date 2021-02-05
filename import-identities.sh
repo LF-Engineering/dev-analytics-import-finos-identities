@@ -24,13 +24,20 @@ then
   echo "$0: missing repo_access.secret file"
   exit 6
 fi
+function remove_clones {
+  rm -rf dev-analytics-finos-metadata dev-analytics-affiliation 1>/dev/null 2>/dev/null
+}
 function cleanup {
+  remove_clones
   rm -rf "${lock_file}"
 }
 > "${lock_file}"
 trap cleanup EXIT
-rm -rf dev-analytics-finos-metadata 1>/dev/null 2>/dev/null
+remove_clones
 git clone "${repo}" || exit 7
-cp dev-analytics-finos-metadata/ssf-bitergia-affiliations.yaml ./identities.yaml || exit 8
-rm -rf dev-analytics-finos-metadata 1>/dev/null 2>/dev/null
-./import-identities ./identities.yaml
+git clone https://github.com/LF-Engineering/dev-analytics-affiliation || exit 8
+cp dev-analytics-finos-metadata/ssf-bitergia-affiliations.yaml ./identities.yaml || exit 9
+cp dev-analytics-affiliation/map_org_names.yaml ./map_org_names.yaml || exit 10
+remove_clones
+echo 'would go!'
+#./import-identities ./identities.yaml
